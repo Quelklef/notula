@@ -18,6 +18,7 @@ import Data.Generic.Rep (class Generic) as X
 import Data.Show.Generic (genericShow) as X
 import Data.Ord.Generic (genericCompare) as X
 import Data.Foldable (class Foldable, fold, foldl, foldr, foldMap, intercalate, elem, minimum, maximum, null, sum, any) as X
+import Data.FoldableWithIndex (foldMapWithIndex) as X
 import Data.Traversable (class Traversable, traverse, for, for_) as X
 import Data.Bifunctor (class Bifunctor, bimap, lmap, rmap) as X
 import Data.Tuple.Nested ((/\), type (/\)) as X

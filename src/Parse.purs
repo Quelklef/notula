@@ -61,9 +61,11 @@ parseStmts =
 
 parseStmt :: Parser Stmt
 parseStmt =
-  parseMacroDefStmt
-  <|> parseNameDefStmt
-  <|> (Stmt_Expr <$> parseExpr)
+  (
+    parseMacroDefStmt
+    <|> parseNameDefStmt
+    <|> (Stmt_Expr <$> parseExpr)
+  ) <* (deadSpace <* optional (string ";"))
 
 parseNameDefStmt :: Parser Stmt
 parseNameDefStmt = do
