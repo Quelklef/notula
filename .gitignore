@@ -1,0 +1,6 @@
+**/output/
+out/
+main.js
+result
+.purs-repl
+.psci_modules
