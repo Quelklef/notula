@@ -18,19 +18,27 @@ import Notula.Stdlib as Stdlib
 import Data.String.CodeUnits (slice)
 
 
+evaluateProgram :: String -> Either String (Array String)
+evaluateProgram text = do
+  { macros, exprs } <-
+      Parse.run Parse.parseProgram text
+      # lmap (\err -> err.error <> " (at char " <> show err.pos <> ")")
+  let transformed = Transform.transform macros <$> exprs
+  let formatted = Format.format <$> transformed
+  pure formatted
+
+
 type Model =
-  { notionFormula :: String
-  , notionPrelude :: String
+  { code :: String
   }
 
 initial :: Model
 initial =
-  { notionFormula: slice 1 (-1) """
+  { code: slice 1 (-1) """
 prop("Author")
 .mapNully("Author email: ".add(it.email()))
 .orElse("🔴 No author")
-"""
-  , notionPrelude: Stdlib.stdlib
+""" <> "\n\n\n\n" <> Stdlib.stdlib
   }
 
 renderApp :: Model -> Html' (ReadWrite Model)
@@ -47,58 +55,29 @@ renderApp model =
     , S.padding gap
     ]
   ]
-  [ E.div
+  [ E.textarea
     [ P.addStyles
       [ S.flex "2"
-      , S.display "flex"
-      , S.gap gap
-      , S.flexDirection "column"
+      , cellSty
       ]
+    , P.onKeyup \evt ref -> do
+          ref # Ref.modify (field @"code" .~ getTargetValue evt)
     ]
-    [ E.textarea
-      [ P.addStyles
-        [ S.flex "1"
-        , cellSty
-        ]
-      , P.onKeyup \evt ref -> do
-            ref # Ref.modify (field @"notionFormula" .~ getTargetValue evt)
-      ]
-      [ E.text model.notionFormula
-      ]
-    , E.textarea
-      [ P.addStyles
-        [ S.flex "3"
-        , cellSty
-        ]
-      , P.onKeyup \evt ref -> do
-            ref # Ref.modify (field @"notionPrelude" .~ getTargetValue evt)
-      ]
-      [ E.text model.notionPrelude
-      ]
+    [ E.text model.code
     ]
   , E.div
     [ P.addStyles
       [ S.flex "1"
-        , cellSty
-      , S.whiteSpace "pre-wrap !important"
+      , cellSty
       ]
     ]
-    [ case Parse.run Parse.parseExpr model.notionFormula of
+    [ case evaluateProgram model.code of
         Left err ->
           E.div
           [ P.addStyles [ S.color "red" ] ]
-          [ E.text $ err.error <> " (at char " <> show err.pos <> " in Notion expression)"
-          ]
-        Right expr ->
-          case Parse.run Parse.parseMacroDefs model.notionPrelude of
-            Left err ->
-              E.div
-              [ P.addStyles [ S.color "red" ] ]
-              [ E.text $ err.error <> " (at char " <> show err.pos <> " in macros)"
-              ]
-            Right macros ->
-              let transformed = Transform.transform macros expr
-              in E.text (Format.format transformed)
+          [ E.text err ]
+        Right results ->
+          E.text (results # intercalate "\n\n")
     ]
   ]
 
@@ -107,7 +86,7 @@ renderApp model =
   cellSty = fold
     [ S.fontSize "14px"
     , S.fontFamily "monospace"
-    , S.whiteSpace "pre"
+    , S.whiteSpace "pre-wrap"
     , S.border "1px solid grey"
     , S.padding ".5em"
     ]

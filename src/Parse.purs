@@ -13,9 +13,11 @@ import Data.List (List (..))
 import Data.Number as Number
 import Data.Either (isRight)
 import Data.Map as Map
+import Data.Semigroup.Last (Last (..))
+import Data.Newtype (un)
 
 import StringParser.Parser (Parser, fail, ParseError, runParser)
-import StringParser.Combinators (many, many1, tryAhead, lookAhead, withError, try, option, sepBy1)
+import StringParser.Combinators (many, many1, tryAhead, lookAhead, withError, try, option, sepBy1, optional)
 import StringParser.CodeUnits (string, noneOf, regex, eof)
 
 run :: forall a. Parser a -> String -> Either ParseError a
@@ -23,6 +25,67 @@ run p = runParser (deadSpace *> p <* deadSpace <* eof)
 
 matches :: forall a. Parser a -> String -> Boolean
 matches p = runParser p >>> isRight
+
+
+-- Parses a block of text as a sequence of statements, then
+-- inlines toplevel name definitions (eg "def A = 100") as
+-- a toplevel call to lets() in each expression
+--
+-- (Unused variables will later get pruned out)
+parseProgram :: Parser { macros :: Array MacroDef, exprs :: Array Expr }
+parseProgram = do
+
+  stmts <- parseStmts
+
+  let macros /\ exprs /\ nameDefs = stmts # foldMap case _ of
+        Stmt_MacroDef macro -> [macro] /\ mempty /\ mempty
+        Stmt_Expr expr -> mempty /\ [expr] /\ mempty
+        Stmt_NameDef name def -> mempty /\ mempty /\ Map.singleton name (Last def)
+
+  let exprs' = exprs # map \expr -> ELets (un Last <$> nameDefs) expr
+
+  pure { macros, exprs: exprs' }
+
+data Stmt
+  = Stmt_MacroDef MacroDef
+      -- ^ eg "def myMax(x, y) = if(x > y, x, y)"
+  | Stmt_NameDef String Expr
+      -- ^ eg "def myConstant = 100"
+  | Stmt_Expr Expr
+      -- ^ eg "10 + f(x)"
+
+parseStmts :: Parser (Array Stmt)
+parseStmts =
+  (deadSpace *> many (parseStmt <* deadSpace))
+  # map Array.fromFoldable
+
+parseStmt :: Parser Stmt
+parseStmt =
+  parseMacroDefStmt
+  <|> parseNameDefStmt
+  <|> (Stmt_Expr <$> parseExpr)
+
+parseNameDefStmt :: Parser Stmt
+parseNameDefStmt = do
+  name /\ def <- parseDefOf parseName parseExpr
+  pure $ Stmt_NameDef name def
+
+parseMacroDefStmt :: Parser Stmt
+parseMacroDefStmt = do
+  { head, args } /\ body <-
+    parseDefOf
+      (parseDottedCallOf parseName parseName <|> parseUndottedCallOf parseName)
+      parseExpr
+  pure $ Stmt_MacroDef { name: head, argNames: args, body }
+
+parseDefOf :: forall a b. Parser a -> Parser b -> Parser (a /\ b)
+parseDefOf parseLhs parseRhs = do
+  lhs <- try (string "def" *> deadSpace1 *> parseLhs)
+  deadSpace
+  _ <- string "="
+  deadSpace
+  rhs <- parseRhs
+  pure (lhs /\ rhs)
 
 parseExpr :: Parser Expr
 parseExpr =
@@ -52,28 +115,14 @@ parseSimpleExpr =
     string "(" *> deadSpace *> p <* deadSpace <* string ")"
 
 
-parseMacroDefs :: Parser (Array MacroDef)
-parseMacroDefs =
-  (deadSpace *> many (parseMacroDef <* deadSpace))
-  # map Array.fromFoldable
-
-parseMacroDef :: Parser MacroDef
-parseMacroDef = do
-  { head, args } <- parseDottedCallOf parseName parseName <|> parseUndottedCallOf parseName
-  deadSpace
-  _ <- string "="
-  deadSpace
-  body <- parseExpr
-  deadSpace
-  _ <- string ";"
-  pure { name: head, argNames: args, body }
-
-
 -- Skip whitespace and comments
 -- Inline comments are #[ like this ]#
 -- Line comments are # like this
 deadSpace :: Parser Unit
-deadSpace = pure unit <* regex "(\\s|#\\[.*\\]#|#.*(\\n|$))*"
+deadSpace = optional deadSpace1
+
+deadSpace1 :: Parser Unit
+deadSpace1 = pure unit <* regex "(\\s|#\\[.*\\]#|#.*(\\n|$))+"
 
 
 charsToString :: forall f. Foldable f => f Char -> String
@@ -109,11 +158,17 @@ parseBooleanExpr =
 
 parseListExpr :: Parser Expr
 parseListExpr = do
-  vals <- delimitedSequenceOf "expression" "[" "]" (defer \_ -> parseExpr)
+  vals <- delimitedSequenceOf "expression" "[" "]" "," (defer \_ -> parseExpr)
   pure (EList (Array.fromFoldable vals))
 
 parseName :: Parser String
-parseName = regex "[a-zA-Z_][a-zA-Z_0-9]*"
+parseName = do
+  name <- regex "[a-zA-Z_][a-zA-Z_0-9]*"
+  case name of
+    "def" -> fail "The name 'def' is reserved"
+      -- ^ This ensures that "a + def a = b" is parsed as two statements "(a +) (def a = b)"
+      --   (with one statement invalid) rather than two operators "((a + def) = b)"
+    _ -> pure name
 
 parseRefExpr :: Parser Expr
 parseRefExpr = ERef <$> parseName
@@ -169,7 +224,7 @@ parseNestedDottedCallExprOf headParser restParser = do
 parseUndottedCallOf :: forall a. Parser a -> Parser { head :: String, args :: Array a }
 parseUndottedCallOf p = do
   funcName <- try $ parseName <* deadSpace <* lookAhead (string "(")
-  args <- delimitedSequenceOf "argument" "(" ")" p
+  args <- delimitedSequenceOf "argument" "(" ")" "," p
   pure { head: funcName, args: Array.fromFoldable args }
 
 
@@ -185,18 +240,19 @@ parseDottedCallOf firstParser restParser = do
 -- Parse the ".f(a, b, c)" part of a dotted call
 parseDotCall :: forall a. Parser a -> Parser (Array a)
 parseDotCall p =
-  delimitedSequenceOf "argument" "(" ")" p
+  delimitedSequenceOf "argument" "(" ")" "," p
   # option []  -- Allows for "x.f" to mean "x.f()"
 
--- An open delimiter followed by zero or more comma-seperated items followed by a close delimiter
-delimitedSequenceOf :: forall a. String -> String -> String -> Parser a -> Parser (Array a)
-delimitedSequenceOf elementIsA openDelim closeDelim parseElement = do
+-- An open delimiter followed by zero or more comma-seperated elements followed by a close delimiter
+-- Elements may have trailing commas
+delimitedSequenceOf :: forall a. String -> String -> String -> String -> Parser a -> Parser (Array a)
+delimitedSequenceOf elementIsA openDelim closeDelim comma parseElement = do
   _ <- string openDelim
   deadSpace
   elems <- many do
     elem <- parseElement `withError` ("Expected " <> elementIsA)
     deadSpace
-    _ <- tryAhead (string closeDelim) <|> (string "," `withError` ("Expected '" <> closeDelim <> "' or ','"))
+    _ <- tryAhead (string closeDelim) <|> (string comma `withError` ("Expected '" <> closeDelim <> "' or '" <> comma <> "'"))
     deadSpace
     pure elem
   deadSpace
@@ -220,4 +276,11 @@ parseOperatorExprOf p = do
   reverse = Array.fromFoldable >>> Array.reverse
 
 parseOperatorName :: Parser String
-parseOperatorName = regex "([a-zA-Z_][a-zA-Z_0-9]*)|([-\\+\\*/&^%\\$@!~=<>]+)"
+parseOperatorName = do
+  name <- regex "([a-zA-Z_][a-zA-Z_0-9]*)|([-\\+\\*/&^%\\$@!~=<>]+)"
+  case name of
+    "def" -> fail "The name 'def' is reserved"
+      -- ^ This ensures that "expr def a = b" is parsed as two statements "(expr) (def a = b)"
+      --   and not as two operators "((expr def a) = b)"
+    _ -> pure name
+
