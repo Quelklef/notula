@@ -3,6 +3,8 @@ module Notula.Parse where
 import Notula.Prelude
 
 import Notula.Core (Expr (..), MacroDef)
+import Notula.Assoc (Assoc)
+import Notula.Assoc as Assoc
 
 import Control.Lazy (defer)
 import Data.Newtype (ala)
@@ -12,13 +14,11 @@ import Data.List as List
 import Data.List (List (..))
 import Data.Number as Number
 import Data.Either (isRight)
-import Data.Map as Map
-import Data.Semigroup.Last (Last (..))
-import Data.Newtype (un)
 
 import StringParser.Parser (Parser, fail, ParseError, runParser)
 import StringParser.Combinators (many, many1, tryAhead, lookAhead, withError, try, option, sepBy1, optional)
 import StringParser.CodeUnits (string, noneOf, regex, eof)
+
 
 run :: forall a. Parser a -> String -> Either ParseError a
 run p = runParser (deadSpace *> p <* deadSpace <* eof)
@@ -40,9 +40,9 @@ parseProgram = do
   let macros /\ exprs /\ nameDefs = stmts # foldMap case _ of
         Stmt_MacroDef macro -> [macro] /\ mempty /\ mempty
         Stmt_Expr expr -> mempty /\ [expr] /\ mempty
-        Stmt_NameDef name def -> mempty /\ mempty /\ Map.singleton name (Last def)
+        Stmt_NameDef name def -> mempty /\ mempty /\ Assoc.singleton name def
 
-  let exprs' = exprs # map \expr -> ELets (un Last <$> nameDefs) expr
+  let exprs' = exprs # map \expr -> ELets nameDefs expr
 
   pure { macros, exprs: exprs' }
 
@@ -185,7 +185,7 @@ parseUndottedCallExprOf p = do
 
   specialCase_let args =
     case args of
-      [ERef name, value, body] -> pure (ELets (Map.singleton name value) body)
+      [ERef name, value, body] -> pure (ELets (Assoc.singleton name value) body)
       _ -> fail "let() must be called like let(name, value, body)"
 
   specialCase_lets args =
@@ -193,12 +193,12 @@ parseUndottedCallExprOf p = do
       Left error -> fail error
       Right { mapping, body } -> pure (ELets mapping body)
 
-  getLetsArgs :: forall f. Foldable f => f Expr -> Either String { mapping :: Map String Expr, body :: Expr }
+  getLetsArgs :: forall f. Foldable f => f Expr -> Either String { mapping :: Assoc String Expr, body :: Expr }
   getLetsArgs args = case List.fromFoldable args of
     Nil -> Left "lets() cannot be called without arguments"
-    Cons body Nil -> Right { mapping: Map.empty, body }
+    Cons body Nil -> Right { mapping: Assoc.empty, body }
     Cons (ERef varName) (Cons varDef rest) ->
-      getLetsArgs rest # map \{ mapping, body } -> { body, mapping: mapping # Map.insert varName varDef }
+      getLetsArgs rest # map \{ mapping, body } -> { body, mapping: mapping # Assoc.insert varName varDef }
     Cons _ _ -> Left "lets() must be called with 2n+1 arguments, where each 2k+0 arg is a variable name"
 
 -- Parses eg "x.f()" and "x.f().g()"

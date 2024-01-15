@@ -2,9 +2,7 @@ module Notula.Core where
 
 import Notula.Prelude
 
-
--- | Association list
-type Assoc k v = Array (k /\ v)
+import Notula.Assoc (Assoc)
 
 
 data Expr
@@ -21,10 +19,10 @@ data Expr
   | ERef String
       -- ^ Variable reference
       --   Includes keywords 'current' and 'index'
-  | ELets (Map String Expr) Expr
-      -- ^ lets()
-      --   Gets its own AST node because that makes transformations easier
-      --   to write
+  | ELets (Assoc String Expr) Expr
+      -- ^ lets(). This gets its own AST node because it makes
+      --   transformations easier to write. We use 'Assoc' instead of 'Map'
+      --   because order matters in emitted lets()
   | ECall String (Array Expr)
       -- ^ Function or operator call, or if() or ifs()
 

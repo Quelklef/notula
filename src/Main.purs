@@ -36,7 +36,7 @@ initial :: Model
 initial =
   { code: slice 1 (-1) """
 prop("Author")
-.mapNully("Author email: ".add(it.email()))
+.mapNully("Author email: " + it.email)
 .orElse("🔴 No author")
 """ <> "\n\n\n\n" <> Stdlib.stdlib
   }

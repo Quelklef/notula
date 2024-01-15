@@ -19,7 +19,7 @@ def x.mapNully(f) = if(x == null, x, let(it, x, f))
 # Product of a list, via e^(ln a + ln b + ln c) = a * b * c
 def list.prod = list.map(current.ln).sum.exp
 
-# -By variants
+# *-By variants
 def list.sumBy(f) = list.map(f).sum()
 def list.prodBy(f) = list.map(f).prod()
 def list.minBy(f) = list.map(f).min()
@@ -37,10 +37,4 @@ def x.isNull = x == null
 def x.isBool = [true, false].includes(x)
 def x.isString = (x + "") == x
 def x.isNumber = (x + "").toNumber() == x
-
-# Parsers
-def stuff.getString(name) = stuff.match(name + "=\S*").at(0).split("=").at(1)
-def stuff.getBool(name) = stuff.getString(name) == "true"
-def stuff.getNumber(name) = stuff.getString(name).toNumber()
-def stuff.getDate(name) = stuff.getString(name).toNumber().fromTimestamp()
 """

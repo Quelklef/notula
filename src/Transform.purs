@@ -3,11 +3,13 @@ module Notula.Transform where
 import Notula.Prelude
 
 import Notula.Core (Expr (..), MacroDef)
+import Notula.Assoc (Assoc)
+import Notula.Assoc as Assoc
 
 import Control.Monad.State (State, evalState)
 import Control.Monad.State as State
-import Data.Map as Map
 import Data.Array (zip, length)
+
 
 -- | AST transformation monad
 type Tfm a = State { symCnt :: Int } a
@@ -56,14 +58,8 @@ mergeLets = case _ of
   ERef name -> ERef name
   ECall name args -> ECall name (mergeLets <$> args)
 
-  ELets vars (ELets vars' body) -> ELets (vars `unionR` vars') body
-  ELets vars body -> ELets vars body
-
-
-  where
-
-  -- Right-biased union
-  unionR map1 map2 = Map.union map2 map1
+  ELets vars (ELets vars' body) -> ELets (vars <> vars') body # mergeLets
+  ELets vars body -> ELets (mergeLets <$> vars) (mergeLets body)
 
 
 cleanupVars :: Expr -> Expr
@@ -77,7 +73,7 @@ cleanupVars = case _ of
   ELets vars body ->
     let
       unusedHere var = (vars # map (countUses var) # sum) == 0
-      toInline = vars # Map.filterWithKey (\var val ->
+      toInline = vars # Assoc.filterWithKey (\var val ->
           -- Single-use
           (countUses var body == 1 && unusedHere var)
           -- Value is simple
@@ -86,13 +82,13 @@ cleanupVars = case _ of
                          ERef _ -> true
                          _ -> false
         )
-      toRemove = vars # Map.filterKeys (\var ->
+      toRemove = vars # Assoc.filterKeys (\var ->
           -- Unused
           countUses var body == 0 && unusedHere var
       )
     in
       ELets
-        (map cleanupVars $ vars `Map.difference` toInline `Map.difference` toRemove)
+        (map cleanupVars $ vars `Assoc.minus` toInline `Assoc.minus` toRemove)
         (body # replaceRefs toInline)
 
   where
@@ -107,7 +103,7 @@ cleanupVars = case _ of
     ECall _name args -> sum (countUses targ <$> args)
     ELets vars body ->
       sum (countUses targ <$> vars)
-      + (if Map.member targ vars then 0 else countUses targ body)
+      + (if Assoc.has targ vars then 0 else countUses targ body)
 
 
 removeRedundantLets :: Expr -> Expr
@@ -119,7 +115,7 @@ removeRedundantLets = case _ of
   ERef name -> ERef name
   ECall name args -> ECall name (removeRedundantLets <$> args)
   ELets vars body ->
-    if Map.isEmpty vars
+    if null vars
     then removeRedundantLets body
     else ELets (removeRedundantLets <$> vars) (removeRedundantLets body)
 
@@ -165,18 +161,18 @@ applyMacros macros =
             fresh <- genSym given
             pure { given, fresh, val }
         pure $ ELets
-                 (Map.fromFoldable $ namesArr # map \{ fresh, val } -> fresh /\ val)
-                 (macro.body # replaceRefs (Map.fromFoldable $ namesArr # map \{ given, fresh } -> given /\ ERef fresh))
+                 (Assoc.fromFoldable $ namesArr # map \{ fresh, val } -> fresh /\ val)
+                 (macro.body # replaceRefs (Assoc.fromFoldable $ namesArr # map \{ given, fresh } -> given /\ ERef fresh))
       else pure expr
     expr -> pure expr
 
 
-replaceRefs :: Map String Expr -> Expr -> Expr
+replaceRefs :: Assoc String Expr -> Expr -> Expr
 replaceRefs repl = case _ of
     ENumber n -> ENumber n
     EString s -> EString s
     EBool b -> EBool b
     EList xs -> EList (replaceRefs repl <$> xs)
-    ERef name -> Map.lookup name repl # fromMaybe (ERef name)
-    ELets vars body -> ELets (replaceRefs repl <$> vars) (body # replaceRefs (Map.difference repl vars))
+    ERef name -> Assoc.lookup name repl # fromMaybe (ERef name)
+    ELets vars body -> ELets (replaceRefs repl <$> vars) (body # replaceRefs (repl `Assoc.minus` vars))
     ECall name args -> ECall name (replaceRefs repl <$> args)

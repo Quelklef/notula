@@ -4,11 +4,11 @@ import Notula.Prelude
 
 import Notula.Core (Expr (..))
 import Notula.Parse as Parse
+import Notula.Assoc as Assoc
 
 import Data.Array as Array
 import Data.Int as Int
 import Data.Set as Set
-import Data.Map as Map
 
 
 formatClosed :: Expr -> String
@@ -32,7 +32,7 @@ format = case _ of
 
   ERef name -> name
   ELets mapping body ->
-    let mappingAsArgs = mapping # Map.toUnfoldable # as @(Array _) # foldMap \(varName /\ varDef) -> [ERef varName, varDef]
+    let mappingAsArgs = mapping # Assoc.toArray # foldMap \(varName /\ varDef) -> [ERef varName, varDef]
     in format (ECall "lets" (mappingAsArgs <> [body]))
 
   ECall funcName args ->
