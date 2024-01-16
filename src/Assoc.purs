@@ -54,18 +54,24 @@ singleton k v = Assoc [k /\ v]
 fromFoldable :: forall f k v. Foldable f => f (k /\ v) -> Assoc k v
 fromFoldable = Assoc <<< Array.fromFoldable
 
-insert :: forall k v. k -> v -> Assoc k v -> Assoc k v
-insert k v (Assoc kvs) = Assoc (kvs <> [k /\ v])
+append :: forall k v. k -> v -> Assoc k v -> Assoc k v
+append k v (Assoc kvs) = Assoc (kvs <> [k /\ v])
+
+prepend :: forall k v. k -> v -> Assoc k v -> Assoc k v
+prepend k v (Assoc kvs) = Assoc ([k /\ v] <> kvs)
 
 has :: forall k v. Eq k => k -> Assoc k v -> Boolean
 has key (Assoc kvs) = kvs # any (fst >>> (_ == key))
 
--- Remove from the first list and keys present in the second
+-- Remove from the first list any keys present in the second
 minus :: forall k v. Ord k => Assoc k v -> Assoc k v -> Assoc k v
 minus (Assoc xs) (Assoc ys) = Assoc (xs # Array.filter keep)
   where
   keep (k /\ _) = not (Set.member k ysKeys)
   ysKeys = Set.fromFoldable $ fst <$> ys
+
+remove :: forall k v. Eq k => k -> Assoc k v -> Assoc k v
+remove key (Assoc kvs) = Assoc $ kvs # Array.filter (fst >>> (_ /= key))
 
 lookup :: forall k v. Eq k => k -> Assoc k v -> Maybe v
 lookup key (Assoc kvs) = kvs # foldMap (\(k /\ v) -> if k == key then Just (Last v) else Nothing) # map (un Last)
@@ -78,5 +84,6 @@ filterKeys pred (Assoc kvs) = Assoc $ kvs # Array.filter (fst >>> pred)
 
 filterWithKey :: forall k v. (k -> v -> Boolean) -> Assoc k v -> Assoc k v
 filterWithKey pred (Assoc kvs) = Assoc $ kvs # Array.filter (uncurry pred)
-  where
-  uncurry f (a /\ b) = f a b
+
+findMapWithKey :: forall k v r. (k -> v -> Maybe r) -> Assoc k v -> Maybe r
+findMapWithKey f (Assoc kvs) = kvs # Array.findMap (uncurry f)

@@ -50,3 +50,6 @@ as x = x
 
 runIdentity :: forall a. X.Identity a -> a
 runIdentity (X.Identity a) = a
+
+uncurry :: forall a b r. (a -> b -> r) -> (a X./\ b -> r)
+uncurry f (a X./\ b) = f a b

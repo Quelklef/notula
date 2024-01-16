@@ -200,7 +200,7 @@ parseUndottedCallExprOf p = do
     Nil -> Left "lets() cannot be called without arguments"
     Cons body Nil -> Right { mapping: Assoc.empty, body }
     Cons (ERef varName) (Cons varDef rest) ->
-      getLetsArgs rest # map \{ mapping, body } -> { body, mapping: mapping # Assoc.insert varName varDef }
+      getLetsArgs rest # map \{ mapping, body } -> { body, mapping: mapping # Assoc.prepend varName varDef }
     Cons _ _ -> Left "lets() must be called with 2n+1 arguments, where each 2k+0 arg is a variable name"
 
 -- Parses eg "x.f()" and "x.f().g()"

@@ -29,9 +29,7 @@ transform :: forall f. Functor f => Foldable f => f MacroDef -> Expr -> Expr
 transform macros =
   (runTfm <<< _) $
     fixEndoM (applyMacros macros)
-    >=> (fixEndo mergeLets >>> pure)
-    >=> (fixEndo cleanupVars >>> pure)
-    >=> (fixEndo removeRedundantLets >>> pure)
+    >=> (cleanUpBindings >>> pure)
 
 
 fixEndo :: forall a. Eq a => (a -> a) -> a -> a
@@ -49,47 +47,68 @@ pipeWithM :: forall a b f m. Functor f => Foldable f => Monad m => f b -> (b -> 
 pipeWithM bs toF a0 = bs # map toF # foldl (>=>) pure # (_ $ a0)
 
 
-mergeLets :: Expr -> Expr
-mergeLets = case _ of
+cleanUpBindings :: Expr -> Expr
+cleanUpBindings = case _ of
   ENumber n -> ENumber n
   EString s -> EString s
   EBool b -> EBool b
-  EList exprs -> EList (mergeLets <$> exprs)
+  EList exprs -> EList (cleanUpBindings <$> exprs)
   ERef name -> ERef name
-  ECall name args -> ECall name (mergeLets <$> args)
+  ECall name args -> ECall name (cleanUpBindings <$> args)
 
-  ELets vars (ELets vars' body) -> ELets (vars <> vars') body # mergeLets
-  ELets vars body -> ELets (mergeLets <$> vars) (mergeLets body)
+  -- Merge nested let-bindings
+  ELets binds (ELets binds' body) ->
+    ELets (binds <> binds') body # cleanUpBindings
 
+  ELets bindings body ->
 
-cleanupVars :: Expr -> Expr
-cleanupVars = case _ of
-  ENumber n -> ENumber n
-  EString s -> EString s
-  EBool b -> EBool b
-  EList exprs -> EList (cleanupVars <$> exprs)
-  ERef name -> ERef name
-  ECall name args -> ECall name (cleanupVars <$> args)
-  ELets vars body ->
-    let
-      unusedHere var = (vars # map (countUses var) # sum) == 0
-      toInline = vars # Assoc.filterWithKey (\var val ->
-          -- Single-use
-          (countUses var body == 1 && unusedHere var)
-          -- Value is simple
-          || case val of ENumber _ -> true
-                         EBool _ -> true
-                         ERef _ -> true
-                         _ -> false
-        )
-      toRemove = vars # Assoc.filterKeys (\var ->
-          -- Unused
-          countUses var body == 0 && unusedHere var
-      )
-    in
-      ELets
-        (map cleanupVars $ vars `Assoc.minus` toInline `Assoc.minus` toRemove)
-        (body # replaceRefs toInline)
+    -- If this is an empty lets(), remove it and go again
+    if null bindings
+    then body # cleanUpBindings  -- Go again
+
+    -- Look for a binding tht is single-use, unused, or
+    -- particularly simple.
+    -- If found, inline/remove it.
+    -- Then go again.
+    --
+    -- We do this one variable at a time. The reuslt algorithm is
+    -- correct but slow. Inlining multiple variables is tricky
+    -- because, eg, in "let(a, 1, b, a, b)" you have to inline
+    -- a into b and b into the body *at the same time*.
+    else
+    bindings
+    # (Assoc.findMapWithKey \var val ->
+        let
+          totalUses =
+            (bindings # map (countUses var) # sum)
+            + (countUses var body)
+          isSimple = case val of
+              ENumber _ -> true
+              EBool _ -> true
+              ERef _ -> true
+              _ -> false
+        in if totalUses == 0
+           then Just $
+             ELets
+               (bindings # Assoc.remove var)
+               body
+           else if totalUses == 1 || isSimple
+           then Just $
+                   ELets
+                     (bindings
+                       # Assoc.remove var
+                       # map (replaceRef var val)
+                     )
+                     (body # replaceRef var val)
+            else Nothing)
+    # case _ of
+        Just modified -> modified # cleanUpBindings  -- Go again
+        Nothing -> (
+
+    -- If no work was done, structurally recur
+    ELets (cleanUpBindings <$> bindings) (cleanUpBindings body)
+
+    )
 
   where
 
@@ -101,23 +120,9 @@ cleanupVars = case _ of
     EList exprs -> sum (countUses targ <$> exprs)
     ERef name -> if name == targ then 1 else 0
     ECall _name args -> sum (countUses targ <$> args)
-    ELets vars body ->
-      sum (countUses targ <$> vars)
-      + (if Assoc.has targ vars then 0 else countUses targ body)
-
-
-removeRedundantLets :: Expr -> Expr
-removeRedundantLets = case _ of
-  ENumber n -> ENumber n
-  EString s -> EString s
-  EBool b -> EBool b
-  EList exprs -> EList (removeRedundantLets <$> exprs)
-  ERef name -> ERef name
-  ECall name args -> ECall name (removeRedundantLets <$> args)
-  ELets vars body ->
-    if null vars
-    then removeRedundantLets body
-    else ELets (removeRedundantLets <$> vars) (removeRedundantLets body)
+    ELets bindings body ->
+      sum (countUses targ <$> bindings)
+      + (if Assoc.has targ bindings then 0 else countUses targ body)
 
 
 -- Attempt to apply a bunch of macros to an expression, recursively
@@ -167,6 +172,9 @@ applyMacros macros =
     expr -> pure expr
 
 
+replaceRef :: String -> Expr -> Expr -> Expr
+replaceRef var val = replaceRefs (Assoc.singleton var val)
+
 replaceRefs :: Assoc String Expr -> Expr -> Expr
 replaceRefs repl = case _ of
     ENumber n -> ENumber n
@@ -176,3 +184,4 @@ replaceRefs repl = case _ of
     ERef name -> Assoc.lookup name repl # fromMaybe (ERef name)
     ELets vars body -> ELets (replaceRefs repl <$> vars) (body # replaceRefs (repl `Assoc.minus` vars))
     ECall name args -> ECall name (replaceRefs repl <$> args)
+
