@@ -30,6 +30,9 @@ derive instance Generic Expr _
 derive instance Eq Expr
 instance Show Expr where show x = genericShow x
 
+mkLets :: Assoc String Expr -> Expr -> Expr
+mkLets bindings =
+  if null bindings then identity else ELets bindings
 
 -- A macro definition
 type MacroDef = { name :: String, argNames :: Array String, body :: Expr }

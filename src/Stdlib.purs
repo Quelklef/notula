@@ -31,8 +31,7 @@ def rangeTo(n) = "x".repeat(n).split("").map(index)
 # Round to a given precision
 def x.toPrec(p) = let(scal, 10^p, round(x * scal) / scal)
 
-# Not working right now
-# I think because it introduces a variable but isn't lets()?
+# Rightwards-facing let()
 def val.as(var, body) = let(var, val, body)
 
 # Type checkers

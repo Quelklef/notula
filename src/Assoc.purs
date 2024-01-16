@@ -79,6 +79,9 @@ lookup key (Assoc kvs) = kvs # foldMap (\(k /\ v) -> if k == key then Just (Last
 toArray :: forall k v. Assoc k v -> Array (k /\ v)
 toArray (Assoc kvs) = kvs
 
+mapKeys :: forall k v. (k -> k) -> Assoc k v -> Assoc k v
+mapKeys f (Assoc kvs) = Assoc $ kvs # map \(k /\ v) -> f k /\ v
+
 filterKeys :: forall k v. (k -> Boolean) -> Assoc k v -> Assoc k v
 filterKeys pred (Assoc kvs) = Assoc $ kvs # Array.filter (fst >>> pred)
 

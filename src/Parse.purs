@@ -2,7 +2,7 @@ module Notula.Parse where
 
 import Notula.Prelude
 
-import Notula.Core (Expr (..), MacroDef)
+import Notula.Core (Expr (..), MacroDef, mkLets)
 import Notula.Assoc (Assoc)
 import Notula.Assoc as Assoc
 
@@ -42,7 +42,7 @@ parseProgram = do
         Stmt_Expr expr -> mempty /\ [expr] /\ mempty
         Stmt_NameDef name def -> mempty /\ mempty /\ Assoc.singleton name def
 
-  let exprs' = exprs # map \expr -> ELets nameDefs expr
+  let exprs' = exprs # map \expr -> mkLets nameDefs expr
 
   pure { macros, exprs: exprs' }
 

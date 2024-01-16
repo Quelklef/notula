@@ -53,3 +53,6 @@ runIdentity (X.Identity a) = a
 
 uncurry :: forall a b r. (a -> b -> r) -> (a X./\ b -> r)
 uncurry f (a X./\ b) = f a b
+
+foldMapM :: forall m f a b. X.Monoid b => X.Monad m => X.Foldable f => (a -> m b) -> f a -> m b
+foldMapM f = X.foldl (\acc a -> X.append X.<$> acc X.<*> f a) (X.pure X.mempty)

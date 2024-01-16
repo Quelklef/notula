@@ -2,7 +2,7 @@ module Notula.Transform where
 
 import Notula.Prelude
 
-import Notula.Core (Expr (..), MacroDef)
+import Notula.Core (Expr (..), mkLets, MacroDef)
 import Notula.Assoc (Assoc)
 import Notula.Assoc as Assoc
 
@@ -79,20 +79,20 @@ cleanUpBindings = case _ of
     bindings
     # (Assoc.findMapWithKey \var val ->
         let
-          totalUses =
-            (bindings # map (countUses var) # sum)
-            + (countUses var body)
+          totalReferences =
+            (bindings # map (countRefs var) # sum)
+            + (countRefs var body)
           isSimple = case val of
               ENumber _ -> true
               EBool _ -> true
               ERef _ -> true
               _ -> false
-        in if totalUses == 0
+        in if totalReferences == 0
            then Just $
              ELets
                (bindings # Assoc.remove var)
                body
-           else if totalUses == 1 || isSimple
+           else if totalReferences == 1 || isSimple
            then Just $
                    ELets
                      (bindings
@@ -109,20 +109,6 @@ cleanUpBindings = case _ of
     ELets (cleanUpBindings <$> bindings) (cleanUpBindings body)
 
     )
-
-  where
-
-  countUses :: String -> Expr -> Int
-  countUses targ = case _ of
-    ENumber _ -> 0
-    EString _ -> 0
-    EBool _ -> 0
-    EList exprs -> sum (countUses targ <$> exprs)
-    ERef name -> if name == targ then 1 else 0
-    ECall _name args -> sum (countUses targ <$> args)
-    ELets bindings body ->
-      sum (countUses targ <$> bindings)
-      + (if Assoc.has targ bindings then 0 else countUses targ body)
 
 
 -- Attempt to apply a bunch of macros to an expression, recursively
@@ -147,27 +133,55 @@ applyMacros macros =
 
   -- Attempt to apply a single macro to the top-level of an expression
   --
-  -- The result of applying macro "lhs(x) = rhs(x)" to expression "lhs(x)" is not
-  -- just "rhs(x)" but rather "lets(_fr, x, rhs(_fr))" where here "_fr" stands for
-  -- some fresh variable.
+  -- When applying a macro, not all macro variables are inlined. Some are
+  -- instead emitted in a let().
   --
-  -- The use of lets() instead of plain replacement is so that macros which use
-  -- arguments more than once won't produce formulas that are overly-large or
-  -- duplicate computation.
+  -- For instance, when applying "F(x, y) = G(x, y)" to the
+  -- expression "F(x0, y0)", if x is inlined but not y, then the
+  -- result will be something like "let(_var, y0, G(x, _var))".
   --
-  -- Elsewhere in the codebase we deal with inlining variables when appropriate.
+  -- The following are the important rules regarding what is inlined:
+  --   * If a variable is used in the macro body as a binding
+  --     name for let(), then it will be inlined
+  --     Eg. in the macro "F(x) = let(x, 2)", x will always be inlined
+  --   * Otherwise, if a variable is used more than once
+  --     in a macro body, then it will not be inlined
+  --     Eg in the macro "F(x) = f(x, x)", x will never be inlined
   applyMacroShallow :: MacroDef -> Expr -> Tfm Expr
   applyMacroShallow macro = case _ of
     expr@(ECall name args) ->
-      if name == macro.name && length args == length macro.argNames
+      if name == macro.name && length args == length macro.argNames  -- Check that the macro matches
       then do
-        namesArr <-
-          for (zip macro.argNames args) \(given /\ val) -> do
-            fresh <- genSym given
-            pure { given, fresh, val }
-        pure $ ELets
-                 (Assoc.fromFoldable $ namesArr # map \{ fresh, val } -> fresh /\ val)
-                 (macro.body # replaceRefs (Assoc.fromFoldable $ namesArr # map \{ given, fresh } -> given /\ ERef fresh))
+
+        (bindingNamesToReplace :: Assoc String String)
+          /\ (varsToInline :: Assoc String Expr)
+          /\ (varsToLet :: Assoc String Expr) <-
+          zip macro.argNames args # foldMapM \(name /\ val) ->
+
+            -- Variable is used as a name in let(), so inline it as a binding name
+            if usedAsBindingName name macro.body
+            then do
+              let newName = case val of
+                    ERef name -> name
+                    _ -> "<error>"  -- bad
+              pure $ Assoc.singleton name newName /\ mempty /\ mempty
+
+            -- Variable is unreferenced in macro body; don't emit
+            else if countRefs name macro.body == 0
+            then pure mempty
+
+            -- Variable is referenced only once; inline it
+            else if countRefs name macro.body == 1
+            then pure $ mempty /\ Assoc.singleton name val /\ mempty
+
+            -- Otherwise, emit as let()
+            else do
+              newName <- genSym name
+              pure $ mempty /\ Assoc.singleton name (ERef newName) /\ Assoc.singleton newName val
+
+        pure $ mkLets varsToLet (macro.body # replaceRefs (varsToInline <> varsToLet) # replaceBindingNames bindingNamesToReplace)
+
+
       else pure expr
     expr -> pure expr
 
@@ -175,6 +189,7 @@ applyMacros macros =
 replaceRef :: String -> Expr -> Expr -> Expr
 replaceRef var val = replaceRefs (Assoc.singleton var val)
 
+-- Replace references to a name with an expression
 replaceRefs :: Assoc String Expr -> Expr -> Expr
 replaceRefs repl = case _ of
     ENumber n -> ENumber n
@@ -185,3 +200,47 @@ replaceRefs repl = case _ of
     ELets vars body -> ELets (replaceRefs repl <$> vars) (body # replaceRefs (repl `Assoc.minus` vars))
     ECall name args -> ECall name (replaceRefs repl <$> args)
 
+-- Replace binding names with other binding names
+-- A binding name is a name used in a let() introducing a new variable
+-- Eg, in "let(x, 5, y, z)" x and y are binding names (but not z)
+replaceBindingNames :: Assoc String String -> Expr -> Expr
+replaceBindingNames repl = case _ of
+    ENumber n -> ENumber n
+    EString s -> EString s
+    EBool b -> EBool b
+    EList xs -> EList (replaceBindingNames repl <$> xs)
+    ERef name -> ERef name
+    ECall name args -> ECall name (replaceBindingNames repl <$> args)
+    ELets bindings body ->
+      ELets
+        ( bindings
+          # Assoc.mapKeys (\k -> Assoc.lookup k repl # fromMaybe k)  -- Replace binding names
+          # map (replaceBindingNames repl)
+        )
+        (replaceBindingNames repl body)
+
+countRefs :: String -> Expr -> Int
+countRefs targ = case _ of
+  ENumber _ -> 0
+  EString _ -> 0
+  EBool _ -> 0
+  EList exprs -> sum (countRefs targ <$> exprs)
+  ERef name -> if name == targ then 1 else 0
+  ECall _name args -> sum (countRefs targ <$> args)
+  ELets bindings body ->
+    sum (countRefs targ <$> bindings)
+    + (if Assoc.has targ bindings then 0 else countRefs targ body)
+
+-- Is the given name used as a binding name in let()?
+usedAsBindingName :: String -> Expr -> Boolean
+usedAsBindingName targ = case _ of
+  ENumber _ -> false
+  EString _ -> false
+  EBool _ -> false
+  EList exprs -> exprs # any (usedAsBindingName targ)
+  ERef _ -> false
+  ECall _name args -> args # any (usedAsBindingName targ)
+  ELets bindings body ->
+    Assoc.has targ bindings
+    || (bindings # any (usedAsBindingName targ))
+    || usedAsBindingName targ body
