@@ -19,8 +19,6 @@ import Data.Either (isRight, either)
 import Data.Maybe (fromJust)
 import Data.Set (Set)
 import Data.Set as Set
-import Data.Foldable (maximumBy)
-import Data.Function (on)
 
 import StringParser.Parser (Parser, fail, ParseError, runParser)
 import StringParser.Combinators (many, many1, tryAhead, lookAhead, withError, try, option, optional)
@@ -281,6 +279,10 @@ parseOperatorName = do
 -- | Operator associativity
 data Associativity = LeftAssoc | RightAssoc
 
+derive instance Generic Associativity _
+derive instance Eq Associativity
+instance Ord Associativity where compare x = genericCompare x
+
 type OpName = String
 
 type OpInfo = { associativity :: Associativity, precedence :: Int }
@@ -337,7 +339,7 @@ parseOperatorExprOf parseTerm = do
   restTermsAndOpsExceptFinal <- many (try termAndOp <* deadSpace) # map Array.fromFoldable
   deadSpace
   finalTerm <- parseTerm
-  pure $ buildOperatorExpr
+  liftEither $ buildOperatorExpr
     { seq: [Right firstTerm, Left firstOp]
            <> (restTermsAndOpsExceptFinal # foldMap \(term /\ op) -> [Right term, Left op])
            <> [Right finalTerm]
@@ -354,6 +356,12 @@ parseOperatorExprOf parseTerm = do
     op <- parseOperatorName
     pure (term /\ op)
 
+  -- Like Control.Monad.Error.Class.liftEither
+  liftEither :: forall a. Either String a -> Parser a
+  liftEither = case _ of
+    Left e -> fail e
+    Right v -> pure v
+
 
 -- Accepts an alternating sequence of expressions and
 -- operators (eg "a + b * c") and resolves operator
@@ -361,64 +369,65 @@ parseOperatorExprOf parseTerm = do
 --
 -- If the input sequence is not alternating, or does not
 -- both start and end with an expression, then
--- this function will **diverge**
+-- this function may **diverge**
 --
--- Known bug: does not error if two operators appear in
--- sequence with the same precedence but differing
--- associativities.
+-- If two operators of equal precedence but differing
+-- associativity are used in sequence, this function
+-- will return Left
 buildOperatorExpr :: forall expr.
   { seq :: Array (Either OpName expr)
   , opInfo :: OpName -> OpInfo
   , mkOpCall :: String -> expr -> expr -> expr
   }
-  -> expr
+  -> Either String expr
 buildOperatorExpr { seq, opInfo, mkOpCall } =
     go seq
 
   where
 
-  go :: Array (Either OpName expr) -> expr
+  go :: Array (Either OpName expr) -> Either String expr
   go soFar = case soFar of
-    [Right result] -> result
-    _ -> let
+    [Right result] -> pure result
+    _ -> do
+      let (ops :: Set String) = soFar # foldMap (either Set.singleton (const mempty))
+      let (maxPrec :: Int) = ops # Set.map (opInfo >>> _.precedence) # maximum # fromJust'
+      let (maxPrecOps :: Set String) = ops # Set.filter (opInfo >>> _.precedence >>> (_ == maxPrec))
+      (assoc :: Associativity) <- getUnanimousAssociativity ops
+      let (idx :: Int) =
+            let search = case assoc of
+                  LeftAssoc -> Array.findIndex
+                  RightAssoc -> Array.findLastIndex
+            in soFar # search (either (_ `elem` maxPrecOps) (const false)) # fromJust'
+      let (op :: OpName) = Array.index soFar idx # fromJust' # fromLeft
+      let (lhs :: expr) = Array.index soFar (idx - 1) # fromJust' # fromRight'
+      let (rhs :: expr) = Array.index soFar (idx + 1) # fromJust' # fromRight'
+      let (expr :: expr) = mkOpCall op lhs rhs
+      let (soFar' :: Array (Either OpName expr)) = soFar # replaceSection (idx - 1) (idx + 1) [Right expr]
+      go soFar'
 
-      ops :: Set String
-      ops = soFar # foldMap (either Set.singleton (const mempty))
+  getUnanimousAssociativity :: Set String -> Either String Associativity
+  getUnanimousAssociativity ops =
+    let pairs = ops # Set.map (\op -> op /\ (opInfo op).associativity)
+        assocs = Set.map snd pairs
+    in case unSingleton assocs of
+         Just assoc -> Right assoc
+         Nothing -> Left $ fold
+           [ "Cannot use the following equal-precedence operators together because they differ in associativity. "
+           , pairs
+               # Set.map (\(op /\ assoc) -> fold
+                   [ op
+                   , "("
+                   , case assoc of
+                       LeftAssoc -> "left"
+                       RightAssoc -> "right"
+                   , "-associative)"
+                   ])
+               # intercalate ", "
+           ]
 
-      maxPrecOp :: String
-      maxPrecOp = ops # maximumOn (opInfo >>> _.precedence) # fromJust'
+  --
 
-      assoc :: Associativity
-      assoc = (opInfo maxPrecOp).associativity
-
-      idx :: Int
-      idx =
-        let search = case assoc of
-              LeftAssoc -> Array.findIndex
-              RightAssoc -> Array.findLastIndex
-        in soFar # search (_ `equalsLeft` maxPrecOp) # fromJust'
-
-      lhs :: expr
-      lhs = Array.index soFar (idx - 1) # fromJust' # fromRight'
-
-      rhs :: expr
-      rhs = Array.index soFar (idx + 1) # fromJust' # fromRight'
-
-      expr :: expr
-      expr = mkOpCall maxPrecOp lhs rhs
-
-      soFar' :: Array (Either OpName expr)
-      soFar' = soFar # replaceSection (idx - 1) (idx + 1) [Right expr]
-
-      in go soFar'
-
-
-  -- ``e `equalsLeft` l`` is like `e == Left l` but avoids an `Eq`
-  -- constraint on the right type for `Either`
-  equalsLeft :: forall a b. Eq a => Either a b -> a -> Boolean
-  equalsLeft e l = case e of
-    Left l' -> l == l'
-    Right _ -> false
+  snd (_ /\ b) = b
 
   fromJust' :: forall a. Maybe a -> a
   fromJust' j = unsafePartial (fromJust j)
@@ -428,10 +437,18 @@ buildOperatorExpr { seq, opInfo, mkOpCall } =
     Left _ -> unsafePartial $ crashWith "fromRight': Left"
     Right v -> v
 
+  fromLeft :: forall a b. Either a b -> a
+  fromLeft = case _ of
+    Left v -> v
+    Right _ -> unsafePartial $ crashWith "fromLeft: Right"
+
+  unSingleton :: forall f a. Foldable f => f a -> Maybe a
+  unSingleton = Array.fromFoldable >>> case _ of
+    [a] -> Just a
+    _ -> Nothing
+
   replaceSection :: forall a. Int -> Int -> Array a -> Array a -> Array a
   replaceSection fromIdx toIdx replaceWith arr =
     Array.slice 0 fromIdx arr <> replaceWith <> Array.slice (toIdx + 1) (Array.length arr) arr
 
-  maximumOn :: forall f a b. Foldable f => Ord b => (a -> b) -> f a -> Maybe a
-  maximumOn to = maximumBy (compare `on` to)
 
