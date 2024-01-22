@@ -315,7 +315,7 @@ getOpInfo =
   where
   mkInfo a p = { associativity: a, precedence: p }
 
-  {- Precedences derived observations like the following:
+  {- Info derived from observations like the following:
 
       ^ before %     | 3 ^ 2 % 2 == 1
       % before *,/   | 11 % 2 * 3 == 3
