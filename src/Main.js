@@ -20,16 +20,21 @@ kvs => () => {
   writeQueryParamsDebounced(kvs);
 };
 
-const writeQueryParamsDebounced = debounced(200, kvs => {
+const writeQueryParamsDebounced = jsDebounce(200, kvs => {
   const qp = new URLSearchParams();
   for (const [k, v] of kvs) qp.append(k, v);
   history.replaceState(null, '', window.location.pathname + '?' + qp.toString());
 });
 
-function debounced(delayMs, f) {
+function jsDebounce(delayMs, f) {
   let timeoutId = 0;
   return (...args) => {
     clearTimeout(timeoutId);
     timeoutId = setTimeout(() => f(...args), delayMs);
   };
 }
+
+export const debounce =
+delayMs => f => () => {
+  return jsDebounce(delayMs, f);
+};

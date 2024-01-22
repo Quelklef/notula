@@ -12,6 +12,7 @@ import Mation.Props as P
 import Mation.Styles as S
 import Mation.Selectors as Sel
 import Mation.Selectors ((#<>))
+import Mation.Lenses (field)
 
 import Notula.Parse as Parse
 import Notula.Format as Format
@@ -35,21 +36,43 @@ evaluateProgram text = do
 type Model =
   { code :: String
   , results :: Either String (Array String)
+  , resultsUpToDate :: Boolean
   }
 
 setCode :: String -> Model -> Model
 setCode code model =
+  if model.code == code
+  then model
+  else model { code = code, resultsUpToDate = false }
+
+setCodeAndEvaluate :: String -> Model -> Model
+setCodeAndEvaluate code model =
   model
     { code = code
     , results = evaluateProgram code
+    , resultsUpToDate = true
     }
+
+-- Updates model.results when model.code changes
+reEvaluationDaemon :: ReadWriteL Model -> Effect Unit
+reEvaluationDaemon ref = do
+  reEvaluateDebounced <- debounce 500.0 reEvaluate
+  ref # Ref.onChange \_ -> reEvaluateDebounced
+  where
+  reEvaluate = do
+    model <- Ref.read ref
+    when (not model.resultsUpToDate) do
+      let results = evaluateProgram model.code
+      ref # Ref.modify ((field @"results" .~ results) >>> (field @"resultsUpToDate" .~ true))
+
 
 initial :: Model
 initial =
   { code: ""
   , results: Right []
+  , resultsUpToDate: true
   }
-  # setCode (slice 1 (-1) """
+  # setCodeAndEvaluate (slice 1 (-1) """
 prop("Author")
 .mapNully("Author email: " + it.email)
 .orElse("🔴 No author")
@@ -290,10 +313,14 @@ main =
     qp <- readQueryParams
     qp # Assoc.lookup "text" # foldMap \text ->
       when (text /= "") do
-        ref # Ref.modify (setCode text)
+        ref # Ref.modify (setCodeAndEvaluate text)
     ref # Ref.onChange \{ code } ->
       writeQueryParams $ Assoc.fromFoldable [ "text" /\ code ]
+
+    -- Embed other daemons
+    reEvaluationDaemon ref
 
 
 foreign import readQueryParams :: Effect (Assoc String String)
 foreign import writeQueryParams :: Assoc String String -> Effect Unit
+foreign import debounce :: Number -> Effect Unit -> Effect (Effect Unit)
