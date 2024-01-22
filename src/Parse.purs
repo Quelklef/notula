@@ -7,16 +7,23 @@ import Notula.Assoc (Assoc)
 import Notula.Assoc as Assoc
 
 import Control.Lazy (defer)
+import Partial.Unsafe (unsafePartial)
+import Partial (crashWith)
 import Data.Newtype (ala)
 import Data.String.CodeUnits (fromCharArray)
 import Data.Array as Array
 import Data.List as List
 import Data.List (List (..))
 import Data.Number as Number
-import Data.Either (isRight)
+import Data.Either (isRight, either)
+import Data.Maybe (fromJust)
+import Data.Set (Set)
+import Data.Set as Set
+import Data.Foldable (maximumBy)
+import Data.Function (on)
 
 import StringParser.Parser (Parser, fail, ParseError, runParser)
-import StringParser.Combinators (many, many1, tryAhead, lookAhead, withError, try, option, sepBy1, optional)
+import StringParser.Combinators (many, many1, tryAhead, lookAhead, withError, try, option, optional)
 import StringParser.CodeUnits (string, noneOf, regex, eof)
 
 
@@ -261,28 +268,170 @@ delimitedSequenceOf elementIsA openDelim closeDelim comma parseElement = do
   _ <- string closeDelim `withError` ("Expected " <> elementIsA <> " or '" <> closeDelim <> "'")
   pure (Array.fromFoldable elems)
 
--- Parses an any-length chain of the same operator, eg "a + b + c"
-parseOperatorExprOf :: Parser Expr -> Parser Expr
-parseOperatorExprOf p = do
-  first /\ opName <- try do
-    lhs <- p
-    deadSpace
-    opName <- parseOperatorName
-    pure (lhs /\ opName)
-  deadSpace
-  rest <- p `sepBy1` (try $ deadSpace *> string opName *> deadSpace)
-  let bigEndo = ala Endo foldMap $ reverse rest # map (\val acc -> ECall opName [acc, val])
-  pure $ bigEndo first
-
-  where
-  reverse = Array.fromFoldable >>> Array.reverse
-
-parseOperatorName :: Parser String
+parseOperatorName :: Parser OpName
 parseOperatorName = do
-  name <- regex "([a-zA-Z_][a-zA-Z_0-9]*)|([-\\+\\*/&^%\\$@!~=<>]+)"
+  name <- regex $ "([a-zA-Z_][a-zA-Z_0-9]*)|([`~!@#$%^&*\\-=+{}\\\\|;:<>/?]+)"
   case name of
     "def" -> fail "The name 'def' is reserved"
       -- ^ This ensures that "expr def a = b" is parsed as two statements "(expr) (def a = b)"
       --   and not as two operators "((expr def a) = b)"
     _ -> pure name
+
+
+-- | Operator associativity
+data Associativity = LeftAssoc | RightAssoc
+
+type OpName = String
+
+type OpInfo = { associativity :: Associativity, precedence :: Int }
+
+getOpInfo :: OpName -> OpInfo
+getOpInfo =
+  case _ of
+
+    "^" -> mkInfo RightAssoc 6
+    "%" -> mkInfo LeftAssoc 5
+    "*" -> mkInfo LeftAssoc 4
+    "/" -> mkInfo LeftAssoc 4
+    "+" -> mkInfo LeftAssoc 3
+    "-" -> mkInfo LeftAssoc 3
+
+    "==" -> mkInfo LeftAssoc 2
+    "!=" -> mkInfo LeftAssoc 2
+    "<=" -> mkInfo LeftAssoc 2
+    ">=" -> mkInfo LeftAssoc 2
+    "<" -> mkInfo LeftAssoc 2
+    ">" -> mkInfo LeftAssoc 2
+
+    "and" -> mkInfo LeftAssoc 1
+    "&&" -> mkInfo LeftAssoc 1
+    "or" -> mkInfo LeftAssoc 1
+    "||" -> mkInfo LeftAssoc 1
+
+    _ -> mkInfo LeftAssoc 0
+
+  where
+  mkInfo a p = { associativity: a, precedence: p }
+
+  {- Precedences derived observations like the following:
+
+      ^ before %     | 3 ^ 2 % 2 == 1
+      % before *,/   | 11 % 2 * 3 == 3
+      *,/ before +,- | 1 + 1 * 0 == 1
+
+      and before or  | false and true or false == false
+
+      ^ right-assoc  | 2 ^ 2 ^ 3 == 256
+      % left-assoc   | 19 % 7 % 3 == 2
+      == no assoc    | 0 == 0 == 0 fails to parse
+
+  -}
+
+
+
+-- Parses an any-length chain of the operators, eg "a + b * c"
+parseOperatorExprOf :: Parser Expr -> Parser Expr
+parseOperatorExprOf parseTerm = do
+  firstTerm /\ firstOp <- try termAndOp
+  deadSpace
+  restTermsAndOpsExceptFinal <- many (try termAndOp <* deadSpace) # map Array.fromFoldable
+  deadSpace
+  finalTerm <- parseTerm
+  pure $ buildOperatorExpr
+    { seq: [Right firstTerm, Left firstOp]
+           <> (restTermsAndOpsExceptFinal # foldMap \(term /\ op) -> [Right term, Left op])
+           <> [Right finalTerm]
+    , opInfo: getOpInfo
+    , mkOpCall: \opName lhs rhs -> ECall opName [lhs, rhs]
+    }
+
+  where
+
+  termAndOp :: Parser (Expr /\ String)
+  termAndOp = do
+    term <- parseTerm
+    deadSpace
+    op <- parseOperatorName
+    pure (term /\ op)
+
+
+-- Accepts an alternating sequence of expressions and
+-- operators (eg "a + b * c") and resolves operator
+-- precedence and associativity to build an expression.
+--
+-- If the input sequence is not alternating, or does not
+-- both start and end with an expression, then
+-- this function will **diverge**
+--
+-- Known bug: does not error if two operators appear in
+-- sequence with the same precedence but differing
+-- associativities.
+buildOperatorExpr :: forall expr.
+  { seq :: Array (Either OpName expr)
+  , opInfo :: OpName -> OpInfo
+  , mkOpCall :: String -> expr -> expr -> expr
+  }
+  -> expr
+buildOperatorExpr { seq, opInfo, mkOpCall } =
+    go seq
+
+  where
+
+  go :: Array (Either OpName expr) -> expr
+  go soFar = case soFar of
+    [Right result] -> result
+    _ -> let
+
+      ops :: Set String
+      ops = soFar # foldMap (either Set.singleton (const mempty))
+
+      maxPrecOp :: String
+      maxPrecOp = ops # maximumOn (opInfo >>> _.precedence) # fromJust'
+
+      assoc :: Associativity
+      assoc = (opInfo maxPrecOp).associativity
+
+      idx :: Int
+      idx =
+        let search = case assoc of
+              LeftAssoc -> Array.findIndex
+              RightAssoc -> Array.findLastIndex
+        in soFar # search (_ `equalsLeft` maxPrecOp) # fromJust'
+
+      lhs :: expr
+      lhs = Array.index soFar (idx - 1) # fromJust' # fromRight'
+
+      rhs :: expr
+      rhs = Array.index soFar (idx + 1) # fromJust' # fromRight'
+
+      expr :: expr
+      expr = mkOpCall maxPrecOp lhs rhs
+
+      soFar' :: Array (Either OpName expr)
+      soFar' = soFar # replaceSection (idx - 1) (idx + 1) [Right expr]
+
+      in go soFar'
+
+
+  -- ``e `equalsLeft` l`` is like `e == Left l` but avoids an `Eq`
+  -- constraint on the right type for `Either`
+  equalsLeft :: forall a b. Eq a => Either a b -> a -> Boolean
+  equalsLeft e l = case e of
+    Left l' -> l == l'
+    Right _ -> false
+
+  fromJust' :: forall a. Maybe a -> a
+  fromJust' j = unsafePartial (fromJust j)
+
+  fromRight' :: forall a b. Either a b -> b
+  fromRight' = case _ of
+    Left _ -> unsafePartial $ crashWith "fromRight': Left"
+    Right v -> v
+
+  replaceSection :: forall a. Int -> Int -> Array a -> Array a -> Array a
+  replaceSection fromIdx toIdx replaceWith arr =
+    Array.slice 0 fromIdx arr <> replaceWith <> Array.slice (toIdx + 1) (Array.length arr) arr
+
+  maximumOn :: forall f a b. Foldable f => Ord b => (a -> b) -> f a -> Maybe a
+  maximumOn to = maximumBy (compare `on` to)
 
