@@ -3,8 +3,10 @@ module Main where
 import Notula.Prelude
 
 import Mation as M
-import Mation (Html', ReadWrite, DomEvent)
+import Mation (Html', ReadWrite, DomEvent, ReadWriteL)
 import Mation.Core.Refs as Ref
+import Mation.Core.Util.Assoc (Assoc)
+import Mation.Core.Util.Assoc as Assoc
 import Mation.Elems as E
 import Mation.Props as P
 import Mation.Styles as S
@@ -256,7 +258,6 @@ renderApp model =
 
 foreign import getTargetValue :: DomEvent -> String
 foreign import copyToClipboard :: String -> Effect Unit
-foreign import setTimeout :: Int -> Effect Unit -> Effect Unit
 
 renderToplevel :: Model -> Html' (ReadWrite Model)
 renderToplevel model =
@@ -274,9 +275,25 @@ renderToplevel model =
 main :: Effect Unit
 main =
   M.runApp
-    { daemon: \_ -> pure unit
+    { daemon
     , initial
     , root: M.underBody
     , render: renderToplevel
     }
 
+  where
+
+  daemon :: ReadWriteL Model -> Effect Unit
+  daemon ref = do
+
+    -- Sync state with url
+    qp <- readQueryParams
+    qp # Assoc.lookup "text" # foldMap \text ->
+      when (text /= "") do
+        ref # Ref.modify (setCode text)
+    ref # Ref.onChange \{ code } ->
+      writeQueryParams $ Assoc.fromFoldable [ "text" /\ code ]
+
+
+foreign import readQueryParams :: Effect (Assoc String String)
+foreign import writeQueryParams :: Assoc String String -> Effect Unit
