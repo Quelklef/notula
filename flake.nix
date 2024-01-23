@@ -90,8 +90,9 @@ outputs = { self, ... }@inputs: let
 
   ];
 
-  # For both development and the live demo
-  devt-shell = pkgs.mkShell {
+
+  # Stuff for dev shell and derivation
+  builds-args = {
     buildInputs = [
 
         # For compiling/bundling the project
@@ -160,7 +161,23 @@ outputs = { self, ... }@inputs: let
   };
 
 in {
-  devShells.${system}.default = devt-shell;
+
+  devShells.${system}.default =
+    pkgs.mkShell builds-args;
+
+  packages.${system}.default =
+    pkgs.stdenv.mkDerivation {
+      name = "notula";
+      src = ./.;
+      buildInputs = builds-args.buildInputs;
+      installPhase = ''
+        ${builds-args.shellHook}
+        notula.bundle
+        mkdir $out
+        mv out/app/* $out
+      '';
+    };
+
 };
 
 }
