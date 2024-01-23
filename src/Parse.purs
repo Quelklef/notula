@@ -6,10 +6,9 @@ import Notula.Core (Expr (..), MacroDef, mkLets)
 import Notula.Assoc (Assoc)
 import Notula.Assoc as Assoc
 
-import Control.Lazy (defer)
+import Control.Lazy (fix)
 import Partial.Unsafe (unsafePartial)
 import Partial (crashWith)
-import Data.Newtype (ala)
 import Data.String.CodeUnits (fromCharArray)
 import Data.Array as Array
 import Data.List as List
@@ -21,7 +20,7 @@ import Data.Set (Set)
 import Data.Set as Set
 
 import StringParser.Parser (Parser, fail, ParseError, runParser)
-import StringParser.Combinators (many, many1, tryAhead, lookAhead, withError, try, option, optional)
+import StringParser.Combinators (many, tryAhead, lookAhead, withError, try, option, optional)
 import StringParser.CodeUnits (string, noneOf, regex, eof)
 
 
@@ -66,60 +65,44 @@ parseStmts =
 
 parseStmt :: Parser Stmt
 parseStmt =
-  (
-    parseMacroDefStmt
-    <|> parseNameDefStmt
-    <|> (Stmt_Expr <$> parseExpr)
+  ( parseDef <|> (Stmt_Expr <$> parseExpr)
   ) <* (deadSpace <* optional (string ";"))
 
-parseNameDefStmt :: Parser Stmt
-parseNameDefStmt = do
-  name /\ def <- parseDefOf parseName parseExpr
-  pure $ Stmt_NameDef name def
-
-parseMacroDefStmt :: Parser Stmt
-parseMacroDefStmt = do
-  { head, args } /\ body <-
-    parseDefOf
-      (parseDottedCallOf parseName parseName <|> parseUndottedCallOf parseName)
-      parseExpr
-  pure $ Stmt_MacroDef { name: head, argNames: args, body }
-
-parseDefOf :: forall a b. Parser a -> Parser b -> Parser (a /\ b)
-parseDefOf parseLhs parseRhs = do
-  lhs <- try (string "def" *> deadSpace1 *> parseLhs)
+parseDef :: Parser Stmt
+parseDef = do
+  try (string "def" *> deadSpace1)
+  lhs <-
+    Left <$> (parseDottedCallOf parseName parseName <|> parseUndottedCallOf parseName)
+    <|> Right <$> parseName
   deadSpace
   _ <- string "="
   deadSpace
-  rhs <- parseRhs
-  pure (lhs /\ rhs)
+  rhs <- parseExpr
+  pure $ case lhs of
+    Left { head, args } -> Stmt_MacroDef { name: head, argNames: args, body: rhs }
+    Right name -> Stmt_NameDef name rhs
 
 parseExpr :: Parser Expr
-parseExpr =
-  (defer \_ -> parseOperatorExprOf parseOperandExpr)
-  <|> (defer \_ -> parseOperandExpr)
+parseExpr = fix \parseExpr' ->
+  parseOperatorExprOf
+    { parseOperand:
+        parseIteratedDottedCallExprOf
+          { parseHead:
+              parseStringExpr
+              <|> parseNumberExpr
+              <|> parseBooleanExpr
+              <|> parseListExprOf parseExpr'
+              <|> parseParenthesizedExprOf parseExpr'
+              <|> parseUndottedCallExprOf parseExpr'
+              <|> parseRefExpr
+          , parseArg: parseExpr'
+          }
+    }
+    
 
--- Expression that can be an argument of an operand
-parseOperandExpr :: Parser Expr
-parseOperandExpr =
-  (defer \_ -> parseNestedDottedCallExprOf parseSimpleExpr parseExpr)
-  <|> (defer \_ -> parseSimpleExpr)
-
--- Expression that can be to the left of a dot
-parseSimpleExpr :: Parser Expr
-parseSimpleExpr =
-  (defer \_ -> parseStringExpr)
-  <|> (defer \_ -> parseNumberExpr)
-  <|> (defer \_ -> parseBooleanExpr)
-  <|> (defer \_ -> parseListExpr)
-  <|> (defer \_ -> parseParenthesizedExprOf parseExpr)
-  <|> (defer \_ -> parseUndottedCallExprOf parseExpr)
-  <|> (defer \_ -> parseRefExpr)
-
-  where
-
-  parseParenthesizedExprOf p =
-    string "(" *> deadSpace *> p <* deadSpace <* string ")"
+parseParenthesizedExprOf :: forall a. Parser a -> Parser a
+parseParenthesizedExprOf p =
+  string "(" *> deadSpace *> p <* deadSpace <* string ")"
 
 
 -- Skip whitespace and comments
@@ -132,8 +115,8 @@ deadSpace1 :: Parser Unit
 deadSpace1 = pure unit <* regex "(\\s|#\\[.*\\]#|#.*(\\n|$))+"
 
 
-charsToString :: forall f. Foldable f => f Char -> String
-charsToString = fromCharArray <<< Array.fromFoldable
+fromChars :: forall f. Foldable f => f Char -> String
+fromChars = fromCharArray <<< Array.fromFoldable
 
 -- Notion treats backslashes literally except when
 -- followed by one of: ", \, n, t
@@ -149,7 +132,7 @@ parseStringExpr = do
             <|> (string "\\" *> pure '\\')
           )
   _ <- string "\""
-  pure (EString $ charsToString chars)
+  pure (EString $ fromChars chars)
 
 parseNumberExpr :: Parser Expr
 parseNumberExpr = do
@@ -163,9 +146,9 @@ parseBooleanExpr =
   (string "true" *> pure (EBool true))
   <|> (string "false" *> pure (EBool false))
 
-parseListExpr :: Parser Expr
-parseListExpr = do
-  vals <- delimitedSequenceOf "expression" "[" "]" "," (defer \_ -> parseExpr)
+parseListExprOf :: Parser Expr -> Parser Expr
+parseListExprOf parseElem = do
+  vals <- delimitedSequenceOf "expression" "[" "]" "," parseElem
   pure (EList (Array.fromFoldable vals))
 
 parseName :: Parser String
@@ -180,6 +163,8 @@ parseName = do
 parseRefExpr :: Parser Expr
 parseRefExpr = ERef <$> parseName
 
+-- Like parseUndottedCallOf, but specialized to Expr, and
+-- with special rules for let() and lets()
 parseUndottedCallExprOf :: Parser Expr -> Parser Expr
 parseUndottedCallExprOf p = do
   { head, args } <- parseUndottedCallOf p
@@ -208,45 +193,53 @@ parseUndottedCallExprOf p = do
       getLetsArgs rest # map \{ mapping, body } -> { body, mapping: mapping # Assoc.prepend varName varDef }
     Cons _ _ -> Left "lets() must be called with 2n+1 arguments, where each 2k+0 arg is a variable name"
 
--- Parses eg "x.f()" and "x.f().g()"
+
+-- eg HEAD.funcName1.funcName2(ARG)
+--
+-- If no dot-calls are present, falls through to the HEAD parser.
+--
 -- Dotted calls need special attention because they cause the grammar to be left-recursive
-parseNestedDottedCallExprOf :: Parser Expr -> Parser Expr -> Parser Expr
-parseNestedDottedCallExprOf headParser restParser = do
-  head <- try $ headParser <* deadSpace <* lookAhead (string ".")
-  calls <- many1 do
-    deadSpace
-    _ <- string "."
+parseIteratedDottedCallExprOf :: { parseHead :: Parser Expr, parseArg :: Parser Expr } -> Parser Expr
+parseIteratedDottedCallExprOf { parseHead, parseArg } = do
+  head <- parseHead
+  calls <- many do
+    _ <- try (deadSpace *> string ".")
     funcName <- parseName
     when (funcName == "let" || funcName == "lets") do fail "Cannot use let() or lets() with a dot"
     deadSpace
-    args <- parseDotCall restParser
+    args <- parseDotCallArglistOf parseArg
     deadSpace
     pure { funcName, args }
-  let bigEndo = ala Endo foldMap $ reverse calls # map (\{ funcName, args } expr -> ECall funcName ([expr] <> args))
-  pure $ bigEndo head
+  let addCall { funcName, args } = \expr -> ECall funcName ([expr] <> args)
+  pure $ rightwardPipe head (addCall <$> calls)
 
   where
-  reverse = Array.fromFoldable >>> Array.reverse
 
+  rightwardPipe :: forall f a. Foldable f => a -> f (a -> a) -> a
+  rightwardPipe a0 fs = foldl (\a f -> f a) a0 fs
+
+
+-- eg funcName(ARG, ARG, ARG)
 parseUndottedCallOf :: forall a. Parser a -> Parser { head :: String, args :: Array a }
-parseUndottedCallOf p = do
+parseUndottedCallOf parseArg = do
   funcName <- try $ parseName <* deadSpace <* lookAhead (string "(")
-  args <- delimitedSequenceOf "argument" "(" ")" "," p
+  args <- delimitedSequenceOf "argument" "(" ")" "," parseArg
   pure { head: funcName, args: Array.fromFoldable args }
 
-
+-- eg HEAD.funcName(ARG, ARG, ARG)
+--
+-- Does NOT fall through if no dot is present
 parseDottedCallOf :: forall a. Parser a -> Parser a -> Parser { head :: String, args :: Array a }
-parseDottedCallOf firstParser restParser = do
-  firstArg <- try $ firstParser <* deadSpace <* (string ".")
+parseDottedCallOf parseHead parseArg = do
+  firstArg <- try $ parseHead <* deadSpace <* (string ".")
   deadSpace
   funcName <- parseName
   deadSpace
-  restArgs <- parseDotCall restParser
+  restArgs <- parseDotCallArglistOf parseArg
   pure { head: funcName, args: [firstArg] <> Array.fromFoldable restArgs }
 
--- Parse the ".f(a, b, c)" part of a dotted call
-parseDotCall :: forall a. Parser a -> Parser (Array a)
-parseDotCall p =
+parseDotCallArglistOf :: forall a. Parser a -> Parser (Array a)
+parseDotCallArglistOf p =
   delimitedSequenceOf "argument" "(" ")" "," p
   # option []  -- Allows for "x.f" to mean "x.f()"
 
@@ -332,29 +325,23 @@ getOpInfo =
 
 
 -- Parses an any-length chain of the operators, eg "a + b * c"
-parseOperatorExprOf :: Parser Expr -> Parser Expr
-parseOperatorExprOf parseTerm = do
-  firstTerm /\ firstOp <- try termAndOp
-  deadSpace
-  restTermsAndOpsExceptFinal <- many (try termAndOp <* deadSpace) # map Array.fromFoldable
-  deadSpace
-  finalTerm <- parseTerm
+--
+-- Falls through if no operators are present
+parseOperatorExprOf :: { parseOperand :: Parser Expr } -> Parser Expr
+parseOperatorExprOf { parseOperand } = do
+  firstOperand <- parseOperand
+  opsAndOperands <- many do
+    opName <- try (deadSpace *> parseOperatorName)
+    deadSpace
+    operand <- parseOperand
+    pure (opName /\ operand)
   liftEither $ buildOperatorExpr
-    { seq: [Right firstTerm, Left firstOp]
-           <> (restTermsAndOpsExceptFinal # foldMap \(term /\ op) -> [Right term, Left op])
-           <> [Right finalTerm]
+    { seq: [Right firstOperand] <> (opsAndOperands # foldMap \(op /\ operand) -> [Left op, Right operand])
     , opInfo: getOpInfo
     , mkOpCall: \opName lhs rhs -> ECall opName [lhs, rhs]
     }
 
   where
-
-  termAndOp :: Parser (Expr /\ String)
-  termAndOp = do
-    term <- parseTerm
-    deadSpace
-    op <- parseOperatorName
-    pure (term /\ op)
 
   -- Like Control.Monad.Error.Class.liftEither
   liftEither :: forall a. Either String a -> Parser a

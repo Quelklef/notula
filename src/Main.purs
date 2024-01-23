@@ -56,7 +56,7 @@ setCodeAndEvaluate code model =
 -- Updates model.results when model.code changes
 reEvaluationDaemon :: ReadWriteL Model -> Effect Unit
 reEvaluationDaemon ref = do
-  reEvaluateDebounced <- debounce 500.0 reEvaluate
+  reEvaluateDebounced <- debounce 150.0 reEvaluate
   ref # Ref.onChange \_ -> reEvaluateDebounced
   where
   reEvaluate = do
