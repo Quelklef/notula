@@ -25,12 +25,17 @@ import Data.Array as Array
 
 evaluateProgram :: String -> Either String (Array { mName :: Maybe String, expr :: String })
 evaluateProgram text = do
-  { macros, formulas } <-
+
+  { callMacroDefs, nameMacroDefs, formulaDefs } <-
       Parse.run Parse.parseProgram text
       # lmap (\err -> err.error <> " (at char " <> show err.pos <> ")")
-  let transformed = formulas # map <<< field @"expr" %~ Transform.transform macros
-  let formatted = transformed # map <<< field @"expr" %~ Format.format
-  pure formatted
+
+  pure $
+    formulaDefs
+    -- Expand macros
+    # map <<< field @"expr" %~ Transform.transform nameMacroDefs callMacroDefs
+    -- Format results
+    # map <<< field @"expr" %~ Format.format
 
 
 type Model =

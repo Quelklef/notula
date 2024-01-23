@@ -34,8 +34,12 @@ mkLets :: Assoc String Expr -> Expr -> Expr
 mkLets bindings =
   if null bindings then identity else ELets bindings
 
--- A macro definition
-type MacroDef = { name :: String, argNames :: Array String, body :: Expr }
+
+-- A macro definition like `f(x) = stuff`
+type CallMacroDef = { name :: String, argNames :: Array String, body :: Expr }
+
+-- A macro definition like `myThing = stuff`
+type NameMacroDef = { name :: String, body :: Expr }
 
 -- A formula definition
 type FormulaDef = { mName :: Maybe String, expr :: Expr }

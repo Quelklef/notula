@@ -2,11 +2,9 @@ module Notula.Parse where
 
 import Notula.Prelude
 
-import Notula.Core (Expr (..), MacroDef, FormulaDef, mkLets)
+import Notula.Core (Expr (..), CallMacroDef, NameMacroDef, FormulaDef)
 import Notula.Assoc (Assoc)
 import Notula.Assoc as Assoc
-
-import Mation.Lenses (field)
 
 import Control.Lazy (fix)
 import Partial.Unsafe (unsafePartial)
@@ -38,24 +36,25 @@ matches p = runParser p >>> isRight
 -- a toplevel call to lets() in each expression
 --
 -- (Unused variables will later get pruned out)
-parseProgram :: Parser { macros :: Array MacroDef, formulas :: Array FormulaDef }
+parseProgram :: Parser
+  { callMacroDefs :: Array CallMacroDef
+  , nameMacroDefs :: Array NameMacroDef
+  , formulaDefs :: Array FormulaDef
+  }
 parseProgram = do
-
   stmts <- parseStmts
+  pure $ stmts # foldMap case _ of
+    Stmt_CallMacroDef def -> empt { callMacroDefs = [def] }
+    Stmt_NameMacroDef def -> empt { nameMacroDefs = [def] }
+    Stmt_Formula def -> empt { formulaDefs = [def] }
 
-  let macros /\ formulas /\ nameDefs = stmts # foldMap case _ of
-        Stmt_MacroDef mdef -> [mdef] /\ mempty /\ mempty
-        Stmt_Formula fdef -> mempty /\ [fdef] /\ mempty
-        Stmt_NameDef name def -> mempty /\ mempty /\ Assoc.singleton name def
-
-  let formulas' = formulas # map <<< field @"expr" %~ mkLets nameDefs
-
-  pure { macros, formulas: formulas' }
+  where
+  empt = { callMacroDefs: [], nameMacroDefs: [], formulaDefs: [] }
 
 data Stmt
-  = Stmt_MacroDef MacroDef
+  = Stmt_CallMacroDef CallMacroDef
       -- ^ eg `def myMax(x, y) = if(x > y, x, y)`
-  | Stmt_NameDef String Expr
+  | Stmt_NameMacroDef NameMacroDef
       -- ^ eg `def myConstant = 100`
   | Stmt_Formula FormulaDef
       -- ^ eg `formula "my thing" 10 + f(x)`
@@ -81,8 +80,8 @@ parseDef = do
   deadSpace
   rhs <- parseExpr
   pure $ case lhs of
-    Left { head, args } -> Stmt_MacroDef { name: head, argNames: args, body: rhs }
-    Right name -> Stmt_NameDef name rhs
+    Left { head, args } -> Stmt_CallMacroDef { name: head, argNames: args, body: rhs }
+    Right name -> Stmt_NameMacroDef { name, body: rhs }
 
 parseExprStmt :: Parser Stmt
 parseExprStmt = do

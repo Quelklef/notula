@@ -2,7 +2,7 @@ module Notula.Transform where
 
 import Notula.Prelude
 
-import Notula.Core (Expr (..), mkLets, MacroDef)
+import Notula.Core (Expr (..), mkLets, NameMacroDef, CallMacroDef)
 import Notula.Assoc (Assoc)
 import Notula.Assoc as Assoc
 
@@ -25,10 +25,11 @@ genSym _suggestedName = do
   pure result
 
 
-transform :: forall f. Functor f => Foldable f => f MacroDef -> Expr -> Expr
-transform macros =
+transform :: forall f. Functor f => Foldable f => f NameMacroDef -> f CallMacroDef -> Expr -> Expr
+transform nameMacroDefs callMacroDefs =
   (runTfm <<< _) $
-    fixEndoM (applyMacros macros)
+    fixEndoM (applyCallMacros callMacroDefs)
+    >=> (applyNameMacros nameMacroDefs >>> pure)
     >=> (cleanUpBindings >>> pure)
 
 
@@ -111,24 +112,32 @@ cleanUpBindings = case _ of
     )
 
 
--- Attempt to apply a bunch of macros to an expression, recursively
-applyMacros :: forall f. Functor f => Foldable f => f MacroDef -> Expr -> Tfm Expr
-applyMacros macros =
-  applyMacrosShallow macros
+-- Apply name macros to an expression
+applyNameMacros :: forall f. Functor f => Foldable f => f NameMacroDef -> Expr -> Expr
+applyNameMacros macros = fixEndo (replaceRefs nameMap)
+  where
+  nameMap :: Assoc String Expr
+  nameMap = macros # foldMap \{ name, body } -> Assoc.singleton name body
+
+
+-- Attempt to apply a bunch of call-macros to an expression, recursively
+applyCallMacros :: forall f. Functor f => Foldable f => f CallMacroDef -> Expr -> Tfm Expr
+applyCallMacros macros =
+  applyManyShallow macros
   >=> case _ of
     ENumber n -> pure $ ENumber n
     EString s -> pure $ EString s
     EBool b -> pure $ EBool b
-    EList exprs -> EList <$> for exprs (applyMacros macros)
+    EList exprs -> EList <$> for exprs (applyCallMacros macros)
     ERef name -> pure $ ERef name
-    ELets vars body -> ELets <$> for vars (applyMacros macros) <*> applyMacros macros body
-    ECall name args -> ECall name <$> for args (applyMacros macros)
+    ELets vars body -> ELets <$> for vars (applyCallMacros macros) <*> applyCallMacros macros body
+    ECall name args -> ECall name <$> for args (applyCallMacros macros)
 
   where
 
   -- Attempt to apply a bunch of macros to an expression, without recurring
-  applyMacrosShallow :: f MacroDef -> Expr -> Tfm Expr
-  applyMacrosShallow macros = pipeWithM macros applyMacroShallow
+  applyManyShallow :: f CallMacroDef -> Expr -> Tfm Expr
+  applyManyShallow macros = pipeWithM macros applyShallow
 
 
   -- Attempt to apply a single macro to the top-level of an expression
@@ -147,8 +156,8 @@ applyMacros macros =
   --   * Otherwise, if a variable is used more than once
   --     in a macro body, then it will not be inlined
   --     Eg in the macro "F(x) = f(x, x)", x will never be inlined
-  applyMacroShallow :: MacroDef -> Expr -> Tfm Expr
-  applyMacroShallow macro = case _ of
+  applyShallow :: CallMacroDef -> Expr -> Tfm Expr
+  applyShallow macro = case _ of
     expr@(ECall name args) ->
       if name == macro.name && length args == length macro.argNames  -- Check that the macro matches
       then do
