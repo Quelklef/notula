@@ -261,7 +261,7 @@ delimitedSequenceOf elementIsA openDelim closeDelim comma parseElement = do
 
 parseOperatorName :: Parser OpName
 parseOperatorName = do
-  name <- regex $ "([a-zA-Z_][a-zA-Z_0-9]*)|([`~!@#$%^&*\\-=+{}\\\\|;:<>/?]+)"
+  name <- regex $ "([a-zA-Z_][a-zA-Z_0-9]*)|([`~!@#$%^&*\\-=+{}\\\\|:<>/?]+)"
   case name of
     "def" -> fail "The name 'def' is reserved"
       -- ^ This ensures that "expr def a = b" is parsed as two statements "(expr) (def a = b)"
