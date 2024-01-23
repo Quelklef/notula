@@ -36,3 +36,7 @@ mkLets bindings =
 
 -- A macro definition
 type MacroDef = { name :: String, argNames :: Array String, body :: Expr }
+
+-- A formula definition
+type FormulaDef = { mName :: Maybe String, expr :: Expr }
+

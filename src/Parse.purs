@@ -2,9 +2,11 @@ module Notula.Parse where
 
 import Notula.Prelude
 
-import Notula.Core (Expr (..), MacroDef, mkLets)
+import Notula.Core (Expr (..), MacroDef, FormulaDef, mkLets)
 import Notula.Assoc (Assoc)
 import Notula.Assoc as Assoc
+
+import Mation.Lenses (field)
 
 import Control.Lazy (fix)
 import Partial.Unsafe (unsafePartial)
@@ -20,7 +22,7 @@ import Data.Set (Set)
 import Data.Set as Set
 
 import StringParser.Parser (Parser, fail, ParseError, runParser)
-import StringParser.Combinators (many, tryAhead, lookAhead, withError, try, option, optional)
+import StringParser.Combinators (many, tryAhead, lookAhead, withError, try, option, optional, optionMaybe)
 import StringParser.CodeUnits (string, noneOf, regex, eof)
 
 
@@ -36,27 +38,27 @@ matches p = runParser p >>> isRight
 -- a toplevel call to lets() in each expression
 --
 -- (Unused variables will later get pruned out)
-parseProgram :: Parser { macros :: Array MacroDef, exprs :: Array Expr }
+parseProgram :: Parser { macros :: Array MacroDef, formulas :: Array FormulaDef }
 parseProgram = do
 
   stmts <- parseStmts
 
-  let macros /\ exprs /\ nameDefs = stmts # foldMap case _ of
-        Stmt_MacroDef macro -> [macro] /\ mempty /\ mempty
-        Stmt_Expr expr -> mempty /\ [expr] /\ mempty
+  let macros /\ formulas /\ nameDefs = stmts # foldMap case _ of
+        Stmt_MacroDef mdef -> [mdef] /\ mempty /\ mempty
+        Stmt_Formula fdef -> mempty /\ [fdef] /\ mempty
         Stmt_NameDef name def -> mempty /\ mempty /\ Assoc.singleton name def
 
-  let exprs' = exprs # map \expr -> mkLets nameDefs expr
+  let formulas' = formulas # map <<< field @"expr" %~ mkLets nameDefs
 
-  pure { macros, exprs: exprs' }
+  pure { macros, formulas: formulas' }
 
 data Stmt
   = Stmt_MacroDef MacroDef
-      -- ^ eg "def myMax(x, y) = if(x > y, x, y)"
+      -- ^ eg `def myMax(x, y) = if(x > y, x, y)`
   | Stmt_NameDef String Expr
-      -- ^ eg "def myConstant = 100"
-  | Stmt_Expr Expr
-      -- ^ eg "10 + f(x)"
+      -- ^ eg `def myConstant = 100`
+  | Stmt_Formula FormulaDef
+      -- ^ eg `formula "my thing" 10 + f(x)`
 
 parseStmts :: Parser (Array Stmt)
 parseStmts =
@@ -65,7 +67,7 @@ parseStmts =
 
 parseStmt :: Parser Stmt
 parseStmt =
-  ( parseDef <|> (Stmt_Expr <$> parseExpr)
+  ( parseDef <|> parseExprStmt
   ) <* (deadSpace <* optional (string ";"))
 
 parseDef :: Parser Stmt
@@ -81,6 +83,14 @@ parseDef = do
   pure $ case lhs of
     Left { head, args } -> Stmt_MacroDef { name: head, argNames: args, body: rhs }
     Right name -> Stmt_NameDef name rhs
+
+parseExprStmt :: Parser Stmt
+parseExprStmt = do
+  try (string "formula" *> deadSpace1)
+  mName <- optionMaybe parseString
+  deadSpace
+  expr <- parseExpr
+  pure $ Stmt_Formula { mName, expr }
 
 parseExpr :: Parser Expr
 parseExpr = fix \parseExpr' ->
@@ -121,7 +131,10 @@ fromChars = fromCharArray <<< Array.fromFoldable
 -- Notion treats backslashes literally except when
 -- followed by one of: ", \, n, t
 parseStringExpr :: Parser Expr
-parseStringExpr = do
+parseStringExpr = EString <$> parseString
+
+parseString :: Parser String
+parseString = do
   _ <- string "\""
   chars <- many (
             noneOf ['\\', '"']
@@ -132,7 +145,7 @@ parseStringExpr = do
             <|> (string "\\" *> pure '\\')
           )
   _ <- string "\""
-  pure (EString $ fromChars chars)
+  pure (fromChars chars)
 
 parseNumberExpr :: Parser Expr
 parseNumberExpr = do
@@ -158,6 +171,7 @@ parseName = do
     "def" -> fail "The name 'def' is reserved"
       -- ^ This ensures that "a + def a = b" is parsed as two statements "(a +) (def a = b)"
       --   (with one statement invalid) rather than two operators "((a + def) = b)"
+    "formula" -> fail "The name 'formula' is reserved"
     _ -> pure name
 
 parseRefExpr :: Parser Expr
@@ -261,11 +275,12 @@ delimitedSequenceOf elementIsA openDelim closeDelim comma parseElement = do
 
 parseOperatorName :: Parser OpName
 parseOperatorName = do
-  name <- regex $ "([a-zA-Z_][a-zA-Z_0-9]*)|([`~!@#$%^&*\\-=+{}\\\\|:<>/?]+)"
+  name <- regex $ "([a-zA-Z_][a-zA-Z_0-9]*)|([`~!@#$%^&*\\-=+{}\\\\|:;<>/?]+)"
   case name of
     "def" -> fail "The name 'def' is reserved"
       -- ^ This ensures that "expr def a = b" is parsed as two statements "(expr) (def a = b)"
       --   and not as two operators "((expr def a) = b)"
+    "formula" -> fail "The name 'formula' is reserved"
     _ -> pure name
 
 

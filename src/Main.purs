@@ -23,19 +23,19 @@ import Data.String.CodeUnits (slice)
 import Data.Array as Array
 
 
-evaluateProgram :: String -> Either String (Array String)
+evaluateProgram :: String -> Either String (Array { mName :: Maybe String, expr :: String })
 evaluateProgram text = do
-  { macros, exprs } <-
+  { macros, formulas } <-
       Parse.run Parse.parseProgram text
       # lmap (\err -> err.error <> " (at char " <> show err.pos <> ")")
-  let transformed = Transform.transform macros <$> exprs
-  let formatted = Format.format <$> transformed
+  let transformed = formulas # map <<< field @"expr" %~ Transform.transform macros
+  let formatted = transformed # map <<< field @"expr" %~ Format.format
   pure formatted
 
 
 type Model =
   { code :: String
-  , results :: Either String (Array String)
+  , results :: Either String (Array { mName :: Maybe String, expr :: String })
   , resultsUpToDate :: Boolean
   }
 
@@ -156,20 +156,27 @@ renderApp model =
             [ results # foldMapWithIndex \resultIdx result ->
               mkCell
               { title:
-                  E.span
+                  E.div
                   []
-                  [ E.text $
-                      if Array.length results == 1
-                      then "Output formula"
-                      else "Formula #" <> show (resultIdx + 1)
-                  , E.span
+                  [ E.div
+                    []
+                    [ E.text $
+                        case result.mName of
+                          Just name -> name
+                          Nothing ->
+                            if Array.length results == 1
+                            then "Output formula"
+                            else "Formula #" <> show (resultIdx + 1)
+                    ]
+                  , E.div
                     [ P.addStyles
                       [ S.fontStyle "italic"
                       , S.fontSize "0.8em"
                       , S.opacity "0.8"
+                      , S.marginTop "2px"
                       ]
                     ]
-                    [ E.text " ⋅ Click to copy!" ]
+                    [ E.text "Click to copy!" ]
                   ]
               , outerProps: []
               , innerElem: E.div
@@ -186,12 +193,12 @@ renderApp model =
                       , S.userSelect "none"
                       ]
                     , P.onClick \_ _ -> do
-                        copyToClipboard result
+                        copyToClipboard result.expr
                     ]
                     [ E.div
                       [ P.addStyles [ S.padding "1em" ]
                       ]
-                      [ E.text result
+                      [ E.text result.expr
                       ]
                     ]
                   ]
