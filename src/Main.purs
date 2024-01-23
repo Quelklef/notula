@@ -80,13 +80,15 @@ prop("Author")
 
 renderApp :: Model -> Html' (ReadWrite Model)
 renderApp model =
+  let appWidth = "1000px"
+  in
   E.div
   [ P.addStyles
     [ S.display "flex"
     , S.flexDirection "column"
     , S.height "100vh"
     , S.gap gap
-    , S.padding $ gap <> " calc(max(" <> gap <> ", (100vw - 1000px) / 2))"
+    , S.padding $ gap <> " calc(max(" <> gap <> ", (100vw - " <> appWidth <> ") / 2))"
     , S.backgroundColor "rgb(230, 230, 230)"
     ]
   ]
@@ -102,7 +104,7 @@ renderApp model =
     [ mkCell
         { title: E.text "Input formula"
         , outerProps:
-          [ P.addStyles [ S.flex "2" ]
+          [ P.addStyles [ S.flex "3" ]
           ]
         , innerElem: E.textarea
         , innerProps:
@@ -171,7 +173,12 @@ renderApp model =
                   ]
               , outerProps: []
               , innerElem: E.div
-              , innerProps: []
+              , innerProps:
+                  [ P.addStyles
+                    [ S.maxHeight "200px"
+                    , S.overflowY "auto"
+                    ]
+                  ]
               , children:
                   [ E.div
                     [ P.addStyles
@@ -263,7 +270,7 @@ renderApp model =
         , S.fontSize "14px"
         , S.fontFamily "monospace"
         , S.whiteSpace "pre-wrap"
-        , S.wordWrap "anywhere"
+        , S.wordBreak "break-all"
         , S.background "rgb(252, 252, 252)"
         , S.border "1px solid rgb(200, 200, 200)"
         , S.borderTop "none"
