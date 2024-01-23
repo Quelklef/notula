@@ -221,7 +221,7 @@ renderApp model =
         , S.margin "0"
         ]
       ]
-      [ E.text "🧛 Notula" ]
+      [ E.text "🧛 Notula (v0)" ]
     , E.p
       [ P.addStyles
         [ S.fontFamily "sans-serif"
